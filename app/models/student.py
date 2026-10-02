@@ -2,7 +2,8 @@
 from sqlalchemy import String, Float, CheckConstraint
 from sqlalchemy.orm import Mapped, mapped_column, validates
 
-from database import Base
+from app.database import Base
+
 
 
 class Student(Base):
