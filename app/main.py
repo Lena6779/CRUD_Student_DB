@@ -1,15 +1,19 @@
-# main.py
+# app/main.py
 from fastapi import FastAPI, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from database import Base, engine, get_db
-from models.student import Student
-from schemas.student import StudentCreate, StudentUpdate, StudentPatch, StudentResponse
+from app.auth import get_current_user  # checks the JWT on protected routes
+from app.database import Base, engine, get_db
+from app.models.student import Student
+from app.models.user import User  # registers the users table before create_all
+from app.routers import auth  # register / token / me routes
+from app.schemas.student import StudentCreate, StudentUpdate, StudentPatch, StudentResponse
 
 Base.metadata.create_all(bind=engine)  # creates tables that don't exist yet
 
 app = FastAPI()
+app.include_router(auth.router, prefix="/auth")  # adds /auth/register, /auth/token, /auth/me
 
 # Helper functions 
 def get_student_or_404(student_id: int, db: Session) -> Student:  # find a student or stop with 404 code
@@ -25,9 +29,29 @@ def email_taken(db: Session, email: str, exclude_id: int | None = None) -> bool:
         stmt = stmt.where(Student.id != exclude_id)  # ignore the student being updated
     return db.scalars(stmt).first() is not None
 
-# CRUD Functions
+
+# Extra protected endpoint
+@app.get("/dashboard")
+def dashboard(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),  # 401 if no valid token
+):
+    total_students = db.scalar(select(func.count()).select_from(Student))  # SELECT COUNT(*) FROM students
+    average_gpa = db.scalar(select(func.avg(Student.gpa)))  # ignores students with no GPA
+    return {
+        "message": f"Welcome back, {current_user.username}!",
+        "total_students": total_students,
+        "average_gpa": round(average_gpa, 2) if average_gpa is not None else None,
+    }
+
+
+# CRUD Functions (all require a logged-in user)
 @app.post("/students", response_model=StudentResponse, status_code=status.HTTP_201_CREATED)
-def create_student(student: StudentCreate, db: Session = Depends(get_db)):
+def create_student(
+    student: StudentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     if email_taken(db, student.email):
         raise HTTPException(status_code=409, detail="Email already registered")  # 409 = conflict (e.g. duplicate email)
 
@@ -43,6 +67,7 @@ def list_students(
     major: str | None = None,  # optional filter: ?major=CS
     min_gpa: float | None = Query(default=None, ge=0.0, le=4.0),  # optional filter: ?min_gpa=3.0
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     stmt = select(Student)  # start with all students
     if major is not None:
@@ -53,12 +78,21 @@ def list_students(
 
 
 @app.get("/students/{student_id}", response_model=StudentResponse)  
-def get_student(student_id: int, db: Session = Depends(get_db)):  # get one student by id
+def get_student(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):  # get one student by id
     return get_student_or_404(student_id, db)  # helper function returns the student or raises 404
 
 
 @app.put("/students/{student_id}", response_model=StudentResponse)
-def replace_student(student_id: int, data: StudentUpdate, db: Session = Depends(get_db)):  # full replacement
+def replace_student(
+    student_id: int,
+    data: StudentUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):  # full replacement
     student = get_student_or_404(student_id, db)  # helper function returns the student or raises 404
 
     if email_taken(db, data.email, exclude_id=student_id):  # ignore this student's own email
@@ -73,7 +107,12 @@ def replace_student(student_id: int, data: StudentUpdate, db: Session = Depends(
 
 
 @app.patch("/students/{student_id}", response_model=StudentResponse)
-def update_student(student_id: int, data: StudentPatch, db: Session = Depends(get_db)):  # partial update
+def update_student(
+    student_id: int,
+    data: StudentPatch,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):  # partial update
     student = get_student_or_404(student_id, db)  # helper function returns the student or raises 404
 
     updates = data.model_dump(exclude_unset=True)  # only the fields the user actually sent
@@ -96,9 +135,12 @@ def update_student(student_id: int, data: StudentPatch, db: Session = Depends(ge
 
 
 @app.delete("/students/{student_id}")
-def delete_student(student_id: int, db: Session = Depends(get_db)):  # delete a student
+def delete_student(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):  # delete a student
     student = get_student_or_404(student_id, db)  # helper function returns the student or raises 404
     db.delete(student)  # mark it for deletion
     db.commit()         # save the change
     return {"message": f"Student {student_id} deleted successfully"}
-
